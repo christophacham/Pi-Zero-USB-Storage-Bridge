@@ -24,7 +24,7 @@ MOUNT_POINT="/mnt/usb_drive"
 
 echo "Configuration:"
 echo "- USB drive image: $USB_IMAGE_PATH"
-echo "- USB drive size: ${USB_IMAGE_SIZE}MB"
+echo "- USB drive size: ${USB_IMAGE_SIZE}MB (64GB)"
 echo "- Mount point: $MOUNT_POINT"
 echo "- SMB share name: USB_Drive"
 echo "- SMB access: Guest (no password required)"
@@ -69,7 +69,8 @@ echo
 echo "=== Step 2: Creating USB Drive Image ==="
 
 if [ ! -f "$USB_IMAGE_PATH" ]; then
-    echo "Creating ${USB_IMAGE_SIZE}MB drive image..."
+    echo "Creating ${USB_IMAGE_SIZE}MB (64GB) drive image..."
+    echo "This will take several minutes..."
     sudo dd if=/dev/zero of="$USB_IMAGE_PATH" bs=1M count="$USB_IMAGE_SIZE" status=progress
     
     echo "Formatting as FAT32..."
@@ -86,29 +87,94 @@ echo "Creating mount point..."
 sudo mkdir -p "$MOUNT_POINT"
 
 echo
-echo "=== Step 3: Setting up USB Gadget Service ==="
+echo "=== Step 3: Setting up Auto-Mount ==="
 
-# Create USB gadget script
+# Create mount script with proper permissions for SMB
+echo "Creating auto-mount script..."
+sudo tee /usr/local/bin/mount-usb-drive.sh > /dev/null << EOF
+#!/bin/bash
+# Auto-mount USB drive image with proper permissions for SMB
+if [ -f "$USB_IMAGE_PATH" ] && ! mountpoint -q "$MOUNT_POINT"; then
+    mount -o loop,umask=000,fmask=111,dmask=000 "$USB_IMAGE_PATH" "$MOUNT_POINT"
+fi
+EOF
+
+sudo chmod +x /usr/local/bin/mount-usb-drive.sh
+
+# Create systemd service for auto-mount instead of cron
+echo "Creating auto-mount systemd service..."
+sudo tee /etc/systemd/system/usb-mount.service > /dev/null << EOF
+[Unit]
+Description=Mount USB Drive Image
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mount-usb-drive.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable the mount service
+sudo systemctl enable usb-mount.service
+
+echo
+echo "=== Step 4: Setting up USB Gadget Service ==="
+
+# Create improved USB gadget script with better error handling
 echo "Creating USB gadget script..."
 sudo tee /usr/local/bin/usb-gadget.sh > /dev/null << EOF
 #!/bin/bash
-# Load USB mass storage gadget module
-modprobe g_mass_storage file=$USB_IMAGE_PATH removable=1
+# Wait for mount to be ready
+sleep 5
+
+# Check if image file exists and is mounted
+if [ ! -f "$USB_IMAGE_PATH" ]; then
+    echo "USB image file not found"
+    exit 1
+fi
+
+if ! mountpoint -q "$MOUNT_POINT"; then
+    echo "USB drive not mounted, attempting mount"
+    mount -o loop,umask=000,fmask=111,dmask=000 "$USB_IMAGE_PATH" "$MOUNT_POINT"
+    sleep 2
+fi
+
+# Remove module if already loaded
+modprobe -r g_mass_storage 2>/dev/null || true
+
+# Load with explicit parameters and error checking
+modprobe g_mass_storage file=$USB_IMAGE_PATH removable=1 ro=0 stall=0
+
+# Verify it loaded
+if lsmod | grep -q g_mass_storage; then
+    echo "USB mass storage gadget loaded successfully"
+    exit 0
+else
+    echo "Failed to load USB mass storage gadget"
+    exit 1
+fi
 EOF
 
 sudo chmod +x /usr/local/bin/usb-gadget.sh
 
-# Create systemd service
+# Create systemd service with proper dependencies
 echo "Creating USB gadget service..."
 sudo tee /etc/systemd/system/usb-gadget.service > /dev/null << EOF
 [Unit]
 Description=USB Mass Storage Gadget
-After=multi-user.target
+After=usb-mount.service
+Requires=usb-mount.service
+Wants=local-fs.target
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/usb-gadget.sh
 RemainAfterExit=yes
+TimeoutStartSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -116,31 +182,6 @@ EOF
 
 # Enable the service
 sudo systemctl enable usb-gadget.service
-
-echo
-echo "=== Step 4: Setting up Auto-Mount ==="
-
-# Create mount script
-echo "Creating auto-mount script..."
-sudo tee /usr/local/bin/mount-usb-drive.sh > /dev/null << EOF
-#!/bin/bash
-# Auto-mount USB drive image
-if [ -f "$USB_IMAGE_PATH" ] && ! mountpoint -q "$MOUNT_POINT"; then
-    mount -o loop "$USB_IMAGE_PATH" "$MOUNT_POINT"
-    chown $USER:$USER "$MOUNT_POINT"
-    chmod 755 "$MOUNT_POINT"
-fi
-EOF
-
-sudo chmod +x /usr/local/bin/mount-usb-drive.sh
-
-# Add to crontab for auto-mount at boot
-echo "Setting up auto-mount at boot..."
-(sudo crontab -l 2>/dev/null; echo "@reboot /usr/local/bin/mount-usb-drive.sh") | sudo crontab -
-
-# Mount now for SMB setup
-echo "Mounting USB drive image..."
-sudo /usr/local/bin/mount-usb-drive.sh
 
 echo
 echo "=== Step 5: Installing and Configuring SMB ==="
@@ -153,22 +194,19 @@ sudo apt install -y samba samba-common-bin
 # Backup original Samba config
 sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.backup
 
-# Configure Samba with guest access
+# Configure Samba with guest access (simplified working config)
 echo "Configuring SMB share with guest access..."
 sudo tee -a /etc/samba/smb.conf > /dev/null << EOF
 
 [USB_Drive]
-comment = USB Drive Share
-path = $MOUNT_POINT
-browseable = yes
-writable = yes
-guest ok = yes
-read only = no
-create mask = 0777
-directory mask = 0777
-force user = $USER
-force group = $USER
-public = yes
+   comment = Public USB Drive
+   path = $MOUNT_POINT
+   browseable = yes
+   writable = yes
+   guest ok = yes
+   public = yes
+   create mask = 0777
+   directory mask = 0777
 EOF
 
 # Restart and enable Samba
@@ -179,17 +217,24 @@ sudo systemctl restart nmbd
 sudo systemctl enable nmbd
 
 echo
-echo "=== Step 6: Creating Test Files ==="
+echo "=== Step 6: Initial Mount and Test Files ==="
 
-# Create a test file
+# Mount now for SMB setup
+echo "Mounting USB drive image with proper permissions..."
+sudo umount "$MOUNT_POINT" 2>/dev/null || true
+sudo mount -o loop,umask=000,fmask=111,dmask=000 "$USB_IMAGE_PATH" "$MOUNT_POINT"
+
+# Create test files
 echo "Creating test files in the USB drive..."
-echo "USB Drive created on $(date)" | sudo tee "$MOUNT_POINT/README.txt" > /dev/null
-sudo mkdir -p "$MOUNT_POINT/gcode"
-echo "Place your .gcode files here" | sudo tee "$MOUNT_POINT/gcode/README.txt" > /dev/null
+echo "USB Drive created on $(date)" > "$MOUNT_POINT/README.txt"
+mkdir -p "$MOUNT_POINT/gcode"
+echo "Place your .gcode files here" > "$MOUNT_POINT/gcode/README.txt"
 
-# Fix permissions
-sudo chown -R "$USER:$USER" "$MOUNT_POINT"
-sudo chmod -R 755 "$MOUNT_POINT"
+# Reload and start services
+echo "Reloading systemd services..."
+sudo systemctl daemon-reload
+sudo systemctl start usb-mount.service
+sudo systemctl start usb-gadget.service
 
 echo
 echo "=== Setup Complete! ==="
