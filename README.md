@@ -10,6 +10,7 @@ The Raspberry Pi Zero W has built-in USB gadget functionality that lets it prete
 2. 3D printer sees it as a regular 64GB USB drive
 3. You can access the same storage from any computer on your network
 4. Upload gcode files remotely, printer reads them locally
+5. Use web interface to refresh USB connection when files change
 
 ## Requirements
 
@@ -32,8 +33,18 @@ The Raspberry Pi Zero W has built-in USB gadget functionality that lets it prete
    - Configure USB gadget mode
    - Set up SMB sharing with guest access
    - Create systemd services for auto-start
+   - Install web refresh interface
 4. Reboot when prompted
 5. Connect Pi to your 3D printer using the USB data port (not power port)
+
+## Daily usage workflow
+
+**The key challenge:** 3D printers cache the USB drive contents and don't see new files until the USB connection is refreshed.
+
+**Simple solution:**
+1. **Upload files** via network: `\\[Pi-IP]\USB_Drive`
+2. **Refresh USB** via web browser: `http://[Pi-IP]:5000` (click the button)
+3. **Connect to printer** - it will now see all your files
 
 ## Access files
 
@@ -41,7 +52,26 @@ From any computer on your network:
 - Windows: `\\[Pi-IP-Address]\USB_Drive`
 - Mac/Linux: `smb://[Pi-IP-Address]/USB_Drive`
 
-No password required. Just copy your gcode files and they'll be available to your 3D printer immediately.
+No password required. Just copy your gcode files and they'll be available after refreshing.
+
+## Web refresh interface
+
+The script installs a simple web interface accessible at `http://[Pi-IP]:5000` that:
+- Shows a "Refresh USB Drive" button
+- Handles all the technical refresh commands automatically  
+- Displays success/error messages
+- Runs automatically on boot
+
+This solves the core issue where 3D printers don't detect new files until the USB connection is reset.
+
+## Alternative refresh methods
+
+If the web interface isn't working, you can refresh via SSH:
+```bash
+ssh [username]@[Pi-IP] "sudo umount -l /mnt/usb_drive && sudo mount -o loop,umask=000,fmask=111,dmask=000 /home/[username]/usb_drive.img /mnt/usb_drive && sudo modprobe -r g_mass_storage && sleep 1 && sudo modprobe g_mass_storage file=/home/[username]/usb_drive.img removable=1 ro=0 stall=0"
+```
+
+Or create a Windows batch file for one-click refresh.
 
 ## Important gotchas and troubleshooting
 
@@ -50,12 +80,18 @@ No password required. Just copy your gcode files and they'll be available to you
 - Must use a data cable, not a power-only cable
 - Some USB cables are charge-only and won't work
 
+### File sync issues
+- **Always refresh before connecting to printer** - this is the most important step
+- Don't access files via network while printer is reading from the drive
+- If printer shows old files, run the web refresh again
+
 ### After reboot issues
 If the Pi doesn't appear as a USB drive after reboot:
 ```bash
 # Check if services are running
 sudo systemctl status usb-mount.service
 sudo systemctl status usb-gadget.service
+sudo systemctl status pi-usb-refresh.service
 
 # If not working, restart the USB gadget
 sudo modprobe -r g_mass_storage
@@ -74,11 +110,6 @@ sudo umount /mnt/usb_drive
 sudo mount -o loop,umask=000,fmask=111,dmask=000 /home/[username]/usb_drive.img /mnt/usb_drive
 ```
 
-### File access conflicts
-- Don't access files over network while 3D printer is reading from the drive
-- Always safely eject from Windows before connecting to printer
-- If printer shows corrupted files, reboot the Pi to reset the USB connection
-
 ### SD card space
 - The script creates a 64GB file that takes up actual space on your SD card
 - Make sure you have at least 70GB free space before running
@@ -91,6 +122,8 @@ sudo mount -o loop,umask=000,fmask=111,dmask=000 /home/[username]/usb_drive.img 
 - Sets up SMB sharing with guest access (no authentication)
 - Creates systemd services for reliable auto-start on boot
 - Configures proper mount permissions for network write access
+- Installs Flask web interface for easy USB refresh
+- Sets up sudo permissions for web interface commands
 
 ## Performance notes
 
@@ -99,4 +132,11 @@ sudo mount -o loop,umask=000,fmask=111,dmask=000 /home/[username]/usb_drive.img 
 - USB connection to printer is faster than network transfer
 - Use a high-quality SD card (Class 10 or better) for best performance
 
-That's it. No more walking back and forth to swap USB drives.
+## Why this works better than alternatives
+
+- **vs. Octoprint:** No complex setup, works with any printer, no web interface complexity
+- **vs. Physical USB drives:** No more walking back and forth, much larger storage
+- **vs. WiFi SD cards:** More reliable, works with any printer, 64GB capacity
+- **vs. Network printing:** Compatible with printers that only support USB storage
+
+The web refresh interface solves the main limitation of USB mass storage emulation - that devices don't automatically detect file changes. One click refresh and you're ready to print.
