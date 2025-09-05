@@ -22,7 +22,7 @@ The Raspberry Pi Zero W has built-in USB gadget functionality that lets it prete
 1. SSH into your Pi Zero W
 2. Download and run the setup script:
    ```bash
-   wget https://raw.githubusercontent.com/yourusername/pi-zero-usb-storage-bridge/main/setup_usb_smb.sh
+   wget https://raw.githubusercontent.com/christophacham/Pi-Zero-USB-Storage-Bridge/main/setup_usb_smb.sh
    chmod +x setup_usb_smb.sh
    ./setup_usb_smb.sh
    ```
